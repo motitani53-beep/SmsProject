@@ -19,7 +19,9 @@ public class SmsResultDto
     [JsonPropertyName("phone_number")]
     public string? PhoneNumber { get; set; }
 
+    /// <summary>Opaque SMSC message id (string only). Never parse as long/ulong or treat as hex; JSON may be number or string.</summary>
     [JsonPropertyName("smsc_message_id")]
+    [JsonConverter(typeof(SmscMessageIdJsonConverter))]
     public string? SmscMessageId { get; set; }
 
     [JsonPropertyName("status")]

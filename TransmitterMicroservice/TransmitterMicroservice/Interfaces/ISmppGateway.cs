@@ -24,8 +24,8 @@ public interface ISmppGateway
     /// <param name="sourceAddress">Sender address.</param>
     /// <param name="destinationAddress">Destination phone number.</param>
     /// <param name="messageText">Message text (supports Hebrew, English, Arabic).</param>
-    /// <param name="deliveryId">Delivery ID to map to SMPP Sequence for tracking.</param>
-    /// <param name="onPartSent">Optional callback invoked after each part is sent successfully (resp, partNumber, totalParts).</param>
+    /// <param name="deliveryId">Application delivery id for logs and RabbitMQ (not SMPP sequence).</param>
+    /// <param name="onPartSent">Optional callback after each successful submit_sm_resp: opaque message id string (same extraction for 1 or N parts), resp, part index, total parts.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The last SubmitSmResp, or null if send failed.</returns>
     Task<SubmitSmResp?> SendSmsAsync(
@@ -33,7 +33,7 @@ public interface ISmppGateway
         string destinationAddress,
         string messageText,
         int deliveryId,
-        Action<SubmitSmResp, int, int>? onPartSent = null,
+        Action<string, SubmitSmResp, int, int>? onPartSent = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>

@@ -172,12 +172,11 @@ public class TransmitterService : BackgroundService
             var messageText = sendRequest.MessageText;
             var deliveryIdValue = deliveryId.Value;
 
-            void OnPartSent(SubmitSmResp submitResp, int partNumber, int totalParts)
+            void OnPartSent(string smscMessageId, SubmitSmResp submitResp, int partNumber, int totalParts)
             {
-                var smscMessageId = submitResp.MessageId?.Trim() ?? string.Empty;
+                // Id string is produced only inside SmppGateway (same path for 1-part and multi-part); do not re-read MessageId here.
                 if (string.IsNullOrEmpty(smscMessageId))
                 {
-                    // Fail fast: do not publish placeholder/internal IDs; require provider MessageId.
                     throw new InvalidOperationException("SubmitSmResp missing provider MessageId");
                 }
 

@@ -4,12 +4,13 @@ import { useAppStore } from '@/store/appStore';
 import { Play, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
-import { findMissingPlaceholders } from '@/utils/messagePlaceholders';
+import { findMissingPlaceholders, findUnusedColumns } from '@/utils/messagePlaceholders';
 
 export function StartCampaignButton() {
   const {
     importedContacts,
     importedColumns,
+    importedPhoneColumnName,
     providers,
     addCampaign,
     setActiveCampaign,
@@ -30,6 +31,10 @@ export function StartCampaignButton() {
     importedColumns.length > 0
       ? findMissingPlaceholders(campaignFormMessage, importedColumns)
       : [];
+  const unusedColumns =
+    importedColumns.length > 0
+      ? findUnusedColumns(campaignFormMessage, importedColumns, importedPhoneColumnName)
+      : [];
 
   const isDisabled =
     launching ||
@@ -38,6 +43,7 @@ export function StartCampaignButton() {
     importedContacts.length === 0 ||
     hasInvalidContacts ||
     missingPlaceholders.length > 0 ||
+    unusedColumns.length > 0 ||
     !allProvidersActive ||
     (campaignFormSenderIdMode !== 'random' && !campaignFormCustomSenderId.trim());
 

@@ -18,6 +18,22 @@ public class SmppGateway : ISmppGateway
 {
     private const int EnquireLinkReportIntervalMinutes = 2;
 
+    /// <summary>Original length &lt; 30 (after newline normalize): scenario A caps total length at <see cref="PaddingShortMessageMaxTotalLength"/>.</summary>
+    private const int PaddingShortMessageMaxOriginalLength = 30;
+
+    /// <summary>Scenario A: total length (text + added spaces, before idempotency marker) must not exceed this.</summary>
+    private const int PaddingShortMessageMaxTotalLength = 70;
+
+    /// <summary>Scenario B: max spaces added in total.</summary>
+    private const int PaddingLongMessageMaxSpaces = 60;
+
+    private const int PaddingShortLineMaxLength = 20;
+    private const int PaddingPerLineMin = 1;
+    private const int PaddingPerLineMax = 8;
+
+    /// <summary>Appended only for idempotency; stripped before SubmitSm (never sent to SMSC).</summary>
+    private const char PaddingCompleteMarker = '\u200C';
+
     private readonly ILogger<SmppGateway> _logger;
     private readonly SmppOptions _options;
     private readonly IRabbitMqManager _rabbitMqManager;
@@ -109,7 +125,7 @@ public class SmppGateway : ISmppGateway
         string destinationAddress,
         string messageText,
         int deliveryId,
-        Action<SubmitSmResp, int, int>? onPartSent = null,
+        Action<string, SubmitSmResp, int, int>? onPartSent = null,
         CancellationToken cancellationToken = default)
     {
         if (_client == null)
@@ -127,7 +143,9 @@ public class SmppGateway : ISmppGateway
             }
         }
 
-        SubmitSm[] parts = BuildSubmitSmParts(sourceAddress, destinationAddress, messageText);
+        var marked = ApplySpaceBudgetPadding(messageText);
+        var textForSmsc = StripPaddingCompleteMarker(marked);
+        SubmitSm[] parts = BuildSubmitSmParts(sourceAddress, destinationAddress, textForSmsc);
         if (parts.Length == 0)
         {
             _logger.LogWarning("SMS builder produced no parts. DeliveryId: {DeliveryId}", deliveryId);
@@ -137,23 +155,47 @@ public class SmppGateway : ISmppGateway
         _logger.LogInformation("Sending message ({PartCount} part(s)) - DeliveryId: {DeliveryId}, To: {Destination}",
             parts.Length, deliveryId, destinationAddress);
 
+        // Submit all concatenated parts in one call so Inetlab returns a SubmitSmResp[] 1:1 with parts
+        // (avoids reused/mismatched response objects when submitting parts sequentially).
+        var responses = await _client.SubmitAsync(parts);
+        if (responses == null || responses.Length != parts.Length)
+        {
+            _logger.LogError(
+                "SubmitAsync returned unexpected response count (expected {Expected}, got {Actual}) - DeliveryId: {DeliveryId}",
+                parts.Length,
+                responses?.Length ?? 0,
+                deliveryId);
+            throw new InvalidOperationException("SubmitAsync did not return one SubmitSmResp per part.");
+        }
+
         SubmitSmResp? lastResp = null;
-        for (int i = 0; i < parts.Length; i++)
+        for (var i = 0; i < parts.Length; i++)
         {
             var part = parts[i];
-            _logger.LogDebug("Sending part {Part}/{Total} - DeliveryId: {DeliveryId}",
+            var resp = responses[i];
+            _logger.LogDebug("Processing SubmitSmResp part {Part}/{Total} - DeliveryId: {DeliveryId}",
                 i + 1, parts.Length, deliveryId);
 
-            var resp = await _client.SubmitAsync(part);
-            if (resp == null || resp.Header.Status != CommandStatus.ESME_ROK)
+            if (resp.Header.Sequence != part.Header.Sequence)
             {
-                var status = resp?.Header.Status ?? CommandStatus.ESME_RUNKNOWNERR;
-                _logger.LogError("SubmitAsync failed for part {Part}/{Total} - DeliveryId: {DeliveryId}, Status: {Status}",
+                _logger.LogWarning(
+                    "SubmitSmResp sequence mismatch for part {Part}/{Total} - DeliveryId: {DeliveryId}. Request seq {ReqSeq}, response seq {RespSeq}. Still using this response's MessageId.",
+                    i + 1,
+                    parts.Length,
+                    deliveryId,
+                    part.Header.Sequence,
+                    resp.Header.Sequence);
+            }
+
+            if (resp.Header.Status != CommandStatus.ESME_ROK)
+            {
+                var status = resp.Header.Status;
+                _logger.LogError("Submit failed for part {Part}/{Total} - DeliveryId: {DeliveryId}, Status: {Status}",
                     i + 1, parts.Length, deliveryId, status);
                 throw new InvalidOperationException($"Submit failed: {status}");
             }
 
-            var providerMessageId = resp.MessageId?.Trim();
+            var providerMessageId = SmppSubmitSmRespMessageId.GetOpaqueTrimmed(resp);
             if (string.IsNullOrEmpty(providerMessageId))
             {
                 _logger.LogError(
@@ -165,14 +207,15 @@ public class SmppGateway : ISmppGateway
             }
 
             lastResp = resp;
-            onPartSent?.Invoke(resp, i + 1, parts.Length);
+            onPartSent?.Invoke(providerMessageId, resp, i + 1, parts.Length);
 
             _logger.LogDebug("Part {Part}/{Total} sent - DeliveryId: {DeliveryId}, SmscMessageId: {SmscMessageId}",
                 i + 1, parts.Length, deliveryId, providerMessageId);
         }
 
+        var lastSmscId = lastResp is null ? null : SmppSubmitSmRespMessageId.GetOpaqueTrimmed(lastResp);
         _logger.LogInformation("Message sent successfully - DeliveryId: {DeliveryId}, SmscMessageId: {SmscMessageId}",
-            deliveryId, lastResp?.MessageId);
+            deliveryId, lastSmscId);
         return lastResp;
     }
 
@@ -294,6 +337,86 @@ public class SmppGateway : ISmppGateway
             lock (_lock) { _isBound = false; }
             PublishDownStatusToServerStatus($"Initial bind failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Whitespace padding before segment split. Only appends spaces (never truncates user text).
+    /// Scenario A: budget = spaces to reach <see cref="PaddingShortMessageMaxTotalLength"/> chars total (hard cap).
+    /// Scenario B: budget = <see cref="PaddingLongMessageMaxSpaces"/> spaces max.
+    /// Ends with <see cref="PaddingCompleteMarker"/>; strip before SMSC with <see cref="StripPaddingCompleteMarker"/>.
+    /// </summary>
+    private static string ApplySpaceBudgetPadding(string messageText)
+    {
+        if (string.IsNullOrEmpty(messageText))
+            return messageText;
+
+        if (messageText[^1] == PaddingCompleteMarker)
+            return messageText;
+
+        var normalized = messageText.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\r", "\n", StringComparison.Ordinal);
+        var scenarioShort = normalized.Length < PaddingShortMessageMaxOriginalLength;
+        var maxSpaceBudget = scenarioShort
+            ? Math.Max(0, PaddingShortMessageMaxTotalLength - normalized.Length)
+            : PaddingLongMessageMaxSpaces;
+
+        var lines = normalized.Split('\n');
+        var linePads = new int[lines.Length];
+        var initialShortLine = new bool[lines.Length];
+        var anyInitialShortLine = false;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var isShort = lines[i].TrimEnd().Length < PaddingShortLineMaxLength;
+            initialShortLine[i] = isShort;
+            if (isShort)
+                anyInitialShortLine = true;
+        }
+
+        var remaining = maxSpaceBudget;
+        var anyLineReceivedPadding = false;
+
+        while (remaining > 0 && anyInitialShortLine)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+                if (!initialShortLine[i] || remaining <= 0)
+                    continue;
+                var cap = Math.Min(PaddingPerLineMax, remaining);
+                var add = Random.Shared.Next(PaddingPerLineMin, cap + 1);
+                linePads[i] += add;
+                remaining -= add;
+                anyLineReceivedPadding = true;
+            }
+        }
+
+        if (!anyLineReceivedPadding && remaining > 0)
+        {
+            var lastIdx = lines.Length - 1;
+            var cap = Math.Min(PaddingPerLineMax, remaining);
+            var add = Random.Shared.Next(PaddingPerLineMin, cap + 1);
+            linePads[lastIdx] += add;
+        }
+
+        var joined = BuildLinesWithPadding(lines, linePads);
+        return joined + PaddingCompleteMarker;
+    }
+
+    private static string BuildLinesWithPadding(string[] rawLines, int[] linePads)
+    {
+        for (var i = 0; i < rawLines.Length; i++)
+        {
+            var core = rawLines[i].TrimEnd();
+            var p = linePads[i];
+            rawLines[i] = p > 0 ? core + new string(' ', p) : rawLines[i];
+        }
+
+        return string.Join("\n", rawLines);
+    }
+
+    private static string StripPaddingCompleteMarker(string text)
+    {
+        if (string.IsNullOrEmpty(text) || text[^1] != PaddingCompleteMarker)
+            return text;
+        return text[..^1];
     }
 
     /// <summary>

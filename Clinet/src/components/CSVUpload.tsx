@@ -4,7 +4,6 @@ import { useAppStore } from '@/store/appStore';
 import { validatePhone } from '@/utils/validation';
 import type { Contact } from '@/types';
 import { Upload, FileSpreadsheet, CheckCircle, X, AlertCircle } from 'lucide-react';
-import { findMissingPlaceholders } from '@/utils/messagePlaceholders';
 import { Button } from '@/components/ui/button';
 import {
   Select,
@@ -42,14 +41,10 @@ export function CSVUpload() {
   const processImport = useCallback((data: ParsedData, selectedPhoneColumn: string) => {
     if (!selectedPhoneColumn) return;
 
-    // Validate that all [placeholders] in the message exist as CSV columns
-    const missing = findMissingPlaceholders(campaignFormMessage, data.columns);
-    if (missing.length > 0) {
-      setError(
-        `העמודות הבאות חסרות בקובץ ה-CSV אך מוזכרות בהודעה: ${missing.map((m) => `[${m}]`).join(', ')}`
-      );
-      return;
-    }
+    // Note: validation that all [placeholders] in the message exist as CSV
+    // columns is handled live in CampaignManager and gates the "start campaign"
+    // button. We intentionally do NOT block the import here, so the user can
+    // fix the message after upload and have the warning clear automatically.
 
     clearImportedData();
 
@@ -77,7 +72,7 @@ export function CSVUpload() {
     setParsedData(null);
     setPhoneColumn('');
     setError(null);
-  }, [setImportedData, clearImportedData, campaignFormMessage]);
+  }, [setImportedData, clearImportedData]);
 
   const processFile = useCallback(
     async (file: File) => {

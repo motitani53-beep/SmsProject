@@ -41,6 +41,21 @@ public class SmscServerService : BackgroundService
         {
             var sourceAddr = submitSm.SourceAddress?.Address ?? "";
             var destAddr = submitSm.DestinationAddress?.Address ?? "";
+
+            // Decode user data (short_message and/or payload) using DataCoding — same as Inetlab samples.
+            var content = client.EncodingMapper.GetMessageText(submitSm) ?? string.Empty;
+            var len = content.Length;
+            var coding = submitSm.DataCoding.ToString();
+            _logger.LogInformation(@"
+┌──────────────── SMS RECEIVED ────────────────┐
+│ From:    {Source}
+│ To:      {Dest}
+│ Coding:  {Coding}
+│ Length:  {Len}
+│ Content: [{Content}]
+└──────────────────────────────────────────────┘",
+                sourceAddr, destAddr, coding, len, content);
+
             // Format: yyMMddHHmmss + RecipientPhoneNumber (plain string, so Web API can match SubmitSmResp and DLR)
             var messageId = DateTime.UtcNow.ToString("yyMMddHHmmss", CultureInfo.InvariantCulture) + destAddr;
 

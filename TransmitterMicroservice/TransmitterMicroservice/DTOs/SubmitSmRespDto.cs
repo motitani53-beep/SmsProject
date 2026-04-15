@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using SmsGateway.Shared.DTOs;
 
 namespace TransmitterMicroservice.DTOs;
 
@@ -19,7 +20,9 @@ public class SubmitSmRespDto
     [JsonPropertyName("phone_number")]
     public string PhoneNumber { get; set; } = string.Empty;
 
+    /// <summary>Opaque SMSC id from SubmitSmResp (string only; never parse as integer).</summary>
     [JsonPropertyName("smsc_message_id")]
+    [JsonConverter(typeof(SmscMessageIdJsonConverter))]
     public string? SmscMessageId { get; set; }
 
     [JsonPropertyName("status")]

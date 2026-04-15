@@ -1,6 +1,6 @@
 import { useAppStore } from '@/store/appStore';
-import { AlertCircle, CheckCircle } from 'lucide-react';
-import { findMissingPlaceholders } from '@/utils/messagePlaceholders';
+import { AlertCircle, AlertTriangle, CheckCircle } from 'lucide-react';
+import { findMissingPlaceholders, findUnusedColumns } from '@/utils/messagePlaceholders';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
@@ -51,12 +51,17 @@ export function CampaignManager() {
     campaignFormCustomSenderId: customSenderId,
     setCampaignFormCustomSenderId: setCustomSenderId,
     importedColumns,
+    importedPhoneColumnName,
   } = useAppStore();
 
   const validContacts = importedContacts.filter((c) => c.isValid);
   const allProvidersActive = providers.every((p) => p.status === 'active');
   const missingPlaceholders =
     importedColumns.length > 0 ? findMissingPlaceholders(message, importedColumns) : [];
+  const unusedColumns =
+    importedColumns.length > 0
+      ? findUnusedColumns(message, importedColumns, importedPhoneColumnName)
+      : [];
 
   return (
     <div className="widget-card">
@@ -88,6 +93,15 @@ export function CampaignManager() {
           <AlertCircle className="h-5 w-5 text-destructive" />
           <p className="text-sm text-destructive">
             העמודות הבאות חסרות בקובץ ה-CSV אך מוזכרות בהודעה: {missingPlaceholders.map((p) => `[${p}]`).join(', ')}
+          </p>
+        </div>
+      )}
+
+      {unusedColumns.length > 0 && (
+        <div className="flex items-center gap-2 p-3 bg-warning/10 border border-warning/20 rounded-lg mb-4">
+          <AlertTriangle className="h-5 w-5 text-warning" />
+          <p className="text-sm text-warning">
+            העמודות הבאות קיימות בקובץ ה-CSV אך לא מופיעות בהודעה: {unusedColumns.map((c) => `[${c}]`).join(', ')}
           </p>
         </div>
       )}

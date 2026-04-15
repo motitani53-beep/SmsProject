@@ -13,6 +13,7 @@ namespace WebApplication1.Services;
 /// <summary>
 /// Consumes from smsc_results queue, buffers SubmitSmResp and DLR messages,
 /// and processes them in batches via <see cref="ISmsBatchProcessor"/> (SubmitSmResp rows in <c>delivery_smsc_ids</c> are upserted by composite <c>smsc_message_id</c> + <c>part_number</c> in <see cref="SmsBatchProcessor"/>), then ack only after SaveChanges.
+/// JSON uses <see cref="SmsResultQueueDeserializer"/> (<see cref="DlrRabbitMqPayload"/> for DLR, <see cref="SmsResultDto"/> for SubmitSmResp) and <see cref="SmsResultQueueDeserializer.Options"/> with <see cref="SmscMessageIdJsonConverter"/> so large SMSC IDs are never rounded.
 /// DLR retries are published to <c>dlr_retry</c> with TTL; when TTL expires, RabbitMQ dead-letters
 /// to the default exchange with routing key = output queue (no manual drain loop).
 /// </summary>
@@ -90,7 +91,7 @@ public class SmsResultProcessor : BackgroundService
                     SmsResultDto? dto = null;
                     try
                     {
-                        dto = JsonSerializer.Deserialize<SmsResultDto>(json);
+                        dto = SmsResultQueueDeserializer.Deserialize(json);
                     }
                     catch (Exception ex)
                     {

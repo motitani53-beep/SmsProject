@@ -2,6 +2,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using System.Text;
 
 namespace SmscServer;
 
@@ -9,6 +10,8 @@ class Program
 {
     static async Task Main(string[] args)
     {
+        Console.OutputEncoding = Encoding.UTF8;
+
         // Build configuration
         var configuration = new ConfigurationBuilder()
             .SetBasePath(Directory.GetCurrentDirectory())

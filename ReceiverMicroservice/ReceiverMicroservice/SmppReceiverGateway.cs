@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Inetlab.SMPP;
@@ -7,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ReceiverMicroservice.Options;
 using ReceiverMicroservice.Services;
+using SmsGateway.Shared.DTOs;
 
 namespace ReceiverMicroservice;
 
@@ -98,17 +100,16 @@ public class SmppReceiverGateway
                 return;
             }
 
-            var smscMessageId = receipt.MessageId ?? string.Empty;
+            var smscMessageId = NormalizeReceiptMessageId(receipt.MessageId);
 
             var status = receipt.State.ToString();
             var timestamp = DateTime.UtcNow.ToString("HH:mm:ss dd/MM/yyyy");
 
-            var payload = new
+            var payload = new DlrRabbitMqPayload
             {
-                type = "DLR",
-                smsc_message_id = smscMessageId,
-                status,
-                timestamp
+                SmscMessageId = smscMessageId,
+                Status = status,
+                Timestamp = timestamp
             };
             var json = JsonSerializer.Serialize(payload);
             Console.WriteLine(json);
@@ -121,6 +122,18 @@ public class SmppReceiverGateway
         {
             _logger.LogError(ex, "Error processing DeliverSm");
         }
+    }
+
+    /// <summary>
+    /// Receipt message id must stay a full digit string; avoid any numeric path that could lose precision.
+    /// </summary>
+    private static string NormalizeReceiptMessageId(object? messageId)
+    {
+        if (messageId is null)
+            return string.Empty;
+        if (messageId is string s)
+            return s;
+        return Convert.ToString(messageId, CultureInfo.InvariantCulture) ?? string.Empty;
     }
 
     private void StartEnquireLinkTimer()
