@@ -81,6 +81,10 @@ namespace SmsGateway.Shared.Migrations
                         .HasColumnType("character varying(50)")
                         .HasColumnName("priority");
 
+                    b.Property<DateTime?>("ProcessingStartedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("processing_started_at");
+
                     b.Property<string>("Provider")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -133,6 +137,9 @@ namespace SmsGateway.Shared.Migrations
                     b.HasIndex("CreatedAt");
 
                     b.HasIndex("Status");
+
+                    b.HasIndex("Status", "SchedulingType", "ScheduledTime")
+                        .HasDatabaseName("idx_campaigns_schedule_pickup");
 
                     b.ToTable("campaigns");
                 });

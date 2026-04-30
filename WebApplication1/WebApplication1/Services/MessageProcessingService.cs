@@ -105,8 +105,10 @@ public class MessageProcessingService
 
             var customFields = AdditionalDataToCustomFields(delivery.AdditionalData);
             var messageText = ReplaceMessageFields(campaign.MessageContent, customFields);
-            var actualSender = _senderPhoneService.GetNextPhoneNumberForCampaign(
-                campaign.Id, i, campaign.SenderType ?? string.Empty, campaign.SenderValue);
+            var actualSender = !string.IsNullOrWhiteSpace(delivery.ActualSender)
+                ? delivery.ActualSender
+                : CampaignSenderResolver.ResolveActualSender(
+                    campaign.Id, i, campaign.SenderType, campaign.SenderValue, _senderPhoneService);
 
             var message = new SmsMessageDto
             {
@@ -140,8 +142,10 @@ public class MessageProcessingService
 
             var customFields = AdditionalDataToCustomFields(delivery.AdditionalData);
             var messageText = ReplaceMessageFields(campaign.MessageContent, customFields);
-            var actualSender = _senderPhoneService.GetNextPhoneNumberForCampaign(
-                campaign.Id, i, campaign.SenderType ?? string.Empty, campaign.SenderValue);
+            var actualSender = !string.IsNullOrWhiteSpace(delivery.ActualSender)
+                ? delivery.ActualSender
+                : CampaignSenderResolver.ResolveActualSender(
+                    campaign.Id, i, campaign.SenderType, campaign.SenderValue, _senderPhoneService);
 
             var message = new SmsMessageDto
             {
@@ -155,6 +159,6 @@ public class MessageProcessingService
             _rabbitMqService.PublishJson(SmsExchange, routingKey, message);
         }
 
-        _logger.LogInformation("Published {Count} messages for campaign {CampaignId} to RabbitMQ", deliveryDetails.Count, campaign.Id);
+        _logger.LogInformation("Published {Count} messages for campaign {CampaignId} to RabbitMQ with routing key {RoutingKey}", deliveryDetails.Count, campaign.Id, routingKey);
     }
 }

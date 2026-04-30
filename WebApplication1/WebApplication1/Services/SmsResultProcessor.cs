@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
@@ -16,6 +17,7 @@ namespace WebApplication1.Services;
 /// JSON uses <see cref="SmsResultQueueDeserializer"/> (<see cref="DlrRabbitMqPayload"/> for DLR, <see cref="SmsResultDto"/> for SubmitSmResp) and <see cref="SmsResultQueueDeserializer.Options"/> with <see cref="SmscMessageIdJsonConverter"/> so large SMSC IDs are never rounded.
 /// DLR retries are published to <c>dlr_retry</c> with TTL; when TTL expires, RabbitMQ dead-letters
 /// to the default exchange with routing key = output queue (no manual drain loop).
+/// Real-time delivery status SignalR broadcasts are sent from <see cref="SmsBatchProcessor"/> (and timeout expiry in <see cref="CampaignMonitoringWorker"/>) after DB commits, not from this class.
 /// </summary>
 public class SmsResultProcessor : BackgroundService
 {
@@ -208,6 +210,9 @@ public class SmsResultProcessor : BackgroundService
             using var scope = _scopeFactory.CreateScope();
             var batchProcessor = scope.ServiceProvider.GetRequiredService<ISmsBatchProcessor>();
             var result = await batchProcessor.ProcessBatchAsync(batch);
+            _logger.LogInformation(
+                "SmsResultProcessor committed batch of {Count} SMSC result(s); SignalR updates (if any) were sent from SmsBatchProcessor for touched delivery rows.",
+                batch.Count);
 
             foreach (var retry in result.DlrRetries)
                 PublishToDlrRetry(retry.Body, retry.RetryCount);
@@ -226,14 +231,63 @@ public class SmsResultProcessor : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Reads <c>x-retry-count</c> from RabbitMQ message headers. Must accept <see cref="int"/> — the client often
+    /// returns integer headers as <see cref="int"/>, not <see cref="long"/>; treating those as 0 caused every
+    /// orphan DLR republish to reset to 1 so the count never reached <see cref="SmsBatchProcessor"/> DLQ threshold.
+    /// </summary>
     private static int GetRetryCount(IDictionary<string, object>? headers)
     {
-        if (headers == null || !headers.TryGetValue(RetryCountHeader, out var val))
+        if (headers == null || headers.Count == 0)
             return 0;
+
+        object? val = null;
+        foreach (var kv in headers)
+        {
+            if (string.Equals(kv.Key, RetryCountHeader, StringComparison.OrdinalIgnoreCase))
+            {
+                val = kv.Value;
+                break;
+            }
+        }
+
+        if (val == null)
+            return 0;
+
         if (val is byte[] bytes)
-            return int.TryParse(Encoding.UTF8.GetString(bytes), out var n) ? n : 0;
+            return int.TryParse(Encoding.UTF8.GetString(bytes), NumberStyles.Integer, CultureInfo.InvariantCulture, out var n)
+                ? Math.Max(0, n)
+                : 0;
+
+        if (val is int i)
+            return Math.Max(0, i);
+        if (val is uint u)
+            return u > int.MaxValue ? int.MaxValue : (int)u;
         if (val is long l)
-            return (int)l;
+            return l < 0 ? 0 : l > int.MaxValue ? int.MaxValue : (int)l;
+        if (val is ulong ul)
+            return ul > int.MaxValue ? int.MaxValue : (int)ul;
+        if (val is short s)
+            return Math.Max(0, (int)s);
+        if (val is ushort us)
+            return us;
+
+        if (val is string str &&
+            int.TryParse(str, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+            return Math.Max(0, parsed);
+
+        if (val is IConvertible conv)
+        {
+            try
+            {
+                return Math.Max(0, conv.ToInt32(CultureInfo.InvariantCulture));
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
         return 0;
     }
 

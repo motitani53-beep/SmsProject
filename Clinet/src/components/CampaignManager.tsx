@@ -92,7 +92,7 @@ export function CampaignManager() {
         <div className="flex items-center gap-2 p-3 bg-destructive/10 border border-destructive/20 rounded-lg mb-4">
           <AlertCircle className="h-5 w-5 text-destructive" />
           <p className="text-sm text-destructive">
-            העמודות הבאות חסרות בקובץ ה-CSV אך מוזכרות בהודעה: {missingPlaceholders.map((p) => `[${p}]`).join(', ')}
+            העמודות הבאות חסרות בקובץ ה-CSV אך מוזכרות בהודעה: {missingPlaceholders.map((p) => `{${p}}`).join(', ')}
           </p>
         </div>
       )}
@@ -101,7 +101,7 @@ export function CampaignManager() {
         <div className="flex items-center gap-2 p-3 bg-warning/10 border border-warning/20 rounded-lg mb-4">
           <AlertTriangle className="h-5 w-5 text-warning" />
           <p className="text-sm text-warning">
-            העמודות הבאות קיימות בקובץ ה-CSV אך לא מופיעות בהודעה: {unusedColumns.map((c) => `[${c}]`).join(', ')}
+            העמודות הבאות קיימות בקובץ ה-CSV אך לא מופיעות בהודעה: {unusedColumns.map((c) => `{${c}}`).join(', ')}
           </p>
         </div>
       )}
@@ -164,9 +164,21 @@ export function CampaignManager() {
               <Input
                 id="sender-id-value"
                 value={customSenderId}
-                onChange={(e) => setCustomSenderId(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (senderIdMode === 'specific') {
+                    // Allow only digits
+                    setCustomSenderId(val.replace(/\D/g, ''));
+                  } else if (senderIdMode === 'alphanumeric') {
+                    // Allow only A-Z, a-z, 0-9, dot, dash, underscore
+                    setCustomSenderId(val.replace(/[^A-Za-z0-9.\-_]/g, ''));
+                  } else {
+                    setCustomSenderId(val);
+                  }
+                }}
                 placeholder={senderIdMode === 'specific' ? '0541234567' : 'MyBusiness'}
                 maxLength={senderIdMode === 'alphanumeric' ? 11 : 15}
+                inputMode={senderIdMode === 'specific' ? 'numeric' : 'text'}
               />
             </div>
           )}

@@ -31,7 +31,8 @@ public class SenderPhoneNumberService
     public string GetNextPhoneNumberForCampaign(int campaignId, int messageIndex, string senderType, string? senderValue)
     {
         // Handle manual_number and manual_string types
-        if (senderType.ToLower() == "manual_number" || senderType.ToLower() == "manual_string")
+        var st = senderType.ToLowerInvariant();
+        if (st == "manual_number" || st == "specific" || st == "manual_string")
         {
             if (!string.IsNullOrEmpty(senderValue))
             {
@@ -42,7 +43,7 @@ public class SenderPhoneNumberService
         }
 
         // Handle random sender type
-        if (senderType.ToLower() == "random")
+        if (st == "random")
         {
             var pool = GetOrCreatePhoneNumberPool(campaignId);
             if (pool == null || pool.Count == 0)

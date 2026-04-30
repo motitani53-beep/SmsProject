@@ -23,7 +23,9 @@ interface AppState {
   // Campaigns
   campaigns: Campaign[];
   activeCampaign: Campaign | null;
-  addCampaign: (campaign: Omit<Campaign, 'id' | 'createdAt' | 'updatedAt'>) => Campaign;
+  addCampaign: (
+    campaign: Omit<Campaign, 'id' | 'createdAt' | 'updatedAt'> & { preferredId?: string }
+  ) => Campaign;
   updateCampaign: (id: string, updates: Partial<Campaign>) => void;
   deleteCampaign: (id: string) => void;
   setActiveCampaign: (campaign: Campaign | null) => void;
@@ -56,6 +58,10 @@ interface AppState {
   setCampaignFormCustomSenderId: (id: string) => void;
   campaignFormLanguage: 'he' | 'en' | 'ar';
   setCampaignFormLanguage: (lang: 'he' | 'en' | 'ar') => void;
+
+  // Clear all campaign-form data + imported contacts + active campaign.
+  // Used when navigating back to the main screen so a campaign can't be resent by mistake.
+  resetCampaignForm: () => void;
 }
 
 const generateId = () => Math.random().toString(36).substring(2, 11);
@@ -119,9 +125,10 @@ export const useAppStore = create<AppState>()(
       activeCampaign: null,
 
       addCampaign: (campaignData) => {
+        const { preferredId, ...rest } = campaignData;
         const newCampaign: Campaign = {
-          ...campaignData,
-          id: generateId(),
+          ...rest,
+          id: preferredId ?? generateId(),
           createdAt: new Date(),
           updatedAt: new Date(),
         };
@@ -235,6 +242,19 @@ export const useAppStore = create<AppState>()(
       setCampaignFormCustomSenderId: (id) => set({ campaignFormCustomSenderId: id }),
       campaignFormLanguage: 'he',
       setCampaignFormLanguage: (lang) => set({ campaignFormLanguage: lang }),
+
+      resetCampaignForm: () =>
+        set({
+          campaignFormName: '',
+          campaignFormMessage: '',
+          campaignFormSenderIdMode: 'random',
+          campaignFormCustomSenderId: '',
+          campaignFormLanguage: 'he',
+          importedContacts: [],
+          importedColumns: [],
+          importedPhoneColumnName: null,
+          activeCampaign: null,
+        }),
     }),
     {
       name: 'sms-campaign-storage',
@@ -245,6 +265,8 @@ export const useAppStore = create<AppState>()(
         campaigns: state.campaigns,
         smsTests: state.smsTests,
         selectedProviderId: state.selectedProviderId,
+        // Persist active campaign so refreshing the progress page keeps the user there.
+        activeCampaign: state.activeCampaign,
       }),
     }
   )

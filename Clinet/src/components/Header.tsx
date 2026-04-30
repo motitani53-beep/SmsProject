@@ -1,3 +1,4 @@
+import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '@/store/appStore';
 import { ROLE_LABELS, type UserRole } from '@/types';
 import {
@@ -16,7 +17,8 @@ const roleIcons: Record<UserRole, React.ReactNode> = {
 };
 
 export function Header() {
-  const { currentUser, setUserRole, logout } = useAppStore();
+  const navigate = useNavigate();
+  const { currentUser, setUserRole, logout, resetCampaignForm } = useAppStore();
 
   const roles: UserRole[] = ['super_admin', 'admin', 'user'];
 
@@ -24,8 +26,11 @@ export function Header() {
     <header className="header-gradient text-primary-foreground shadow-lg">
       <div className="container mx-auto px-6 py-4">
         <div className="flex items-center justify-between">
-          {/* Logo & Title */}
-          <div className="flex items-center gap-3">
+          {/* Logo & Title — clickable, navigates to home */}
+          <div
+            className="flex items-center gap-3 cursor-pointer"
+            onClick={() => { resetCampaignForm(); navigate('/'); }}
+          >
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary-foreground/20 backdrop-blur-sm">
               <MessageSquare className="h-6 w-6" />
             </div>

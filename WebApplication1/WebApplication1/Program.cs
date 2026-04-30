@@ -1,7 +1,9 @@
+using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
 using SmsGateway.Shared.Data;
 using SmsGateway.Shared.Options;
+using WebApplication1.Hubs;
 using WebApplication1.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -17,7 +19,11 @@ Log.Logger = new LoggerConfiguration()
 builder.Host.UseSerilog();
 
 // Add services to the container
-builder.Services.AddControllers();
+builder.Services.AddControllers().AddJsonOptions(options =>
+{
+    options.JsonSerializerOptions.ReferenceHandler = ReferenceHandler.IgnoreCycles;
+});
+builder.Services.AddSignalR();
 builder.Services.AddOpenApi();
 builder.Services.AddMemoryCache(); // Required for SenderPhoneNumberService
 
@@ -38,17 +44,20 @@ builder.Services.AddSingleton<RabbitMqTopicSetupService>();
 builder.Services.AddSingleton<SmscStatusStore>();
 builder.Services.AddHostedService<SmscStatusConsumer>();
 builder.Services.AddHostedService<QueueDispatcherService>();
+builder.Services.AddHostedService<CampaignSchedulerWorker>();
 builder.Services.AddHostedService<CampaignMonitoringWorker>();
 builder.Services.AddHostedService<SmsResultProcessor>();
 
-// Add CORS if needed
+// CORS: explicit origin + credentials required for SignalR cross-origin negotiation (cannot use AllowAnyOrigin with credentials).
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
     {
-        policy.AllowAnyOrigin()
+        // Include this repo's Vite port (vite.config.ts: 8080) plus localhost:3000 as requested for credential-based SignalR.
+        policy.WithOrigins("http://localhost:3000", "http://localhost:8080")
               .AllowAnyMethod()
-              .AllowAnyHeader();
+              .AllowAnyHeader()
+              .AllowCredentials();
     });
 });
 
@@ -125,6 +134,7 @@ app.UseCors();
 app.UseHttpsRedirection();
 app.UseAuthorization();
 app.MapControllers();
+app.MapHub<CampaignHub>("/campaignHub");
 
 Log.Information("Web API started");
 

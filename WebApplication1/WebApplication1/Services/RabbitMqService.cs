@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 using System.Text;
@@ -8,6 +9,7 @@ namespace WebApplication1.Services;
 
 public class RabbitMqService : IRabbitMqService, IDisposable
 {
+    private readonly ILogger<RabbitMqService> _logger;
     private readonly RabbitMqOptions _options;
     private IConnection? _connection;
     private IModel? _channel;
@@ -16,9 +18,10 @@ public class RabbitMqService : IRabbitMqService, IDisposable
 
     private const string SmsExchange = "sms_exchange";
 
-    public RabbitMqService(IOptions<RabbitMqOptions> options)
+    public RabbitMqService(IOptions<RabbitMqOptions> options, ILogger<RabbitMqService> logger)
     {
         _options = options.Value;
+        _logger = logger;
     }
 
     public void EnsureConnection()
@@ -60,6 +63,46 @@ public class RabbitMqService : IRabbitMqService, IDisposable
         {
             return false;
         }
+    }
+
+    /// <inheritdoc />
+    public string? TryGetFirstAvailableSmsTopicRoutingKey()
+    {
+        try
+        {
+            EnsureConnection();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TryGetFirstAvailableSmsTopicRoutingKey: could not ensure RabbitMQ connection");
+            return null;
+        }
+
+        lock (_lock)
+        {
+            if (_channel == null || !_channel.IsOpen)
+                return null;
+
+            var n = _options.NumberOfTopics;
+            var prefix = _options.TopicNamePrefix;
+
+            for (var i = 0; i < n; i++)
+            {
+                try
+                {
+                    var queueName = $"sms_queue_{i}";
+                    var decl = _channel.QueueDeclarePassive(queueName);
+                    if (decl.MessageCount == 0)
+                        return $"{prefix}.{i}";
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "QueueDeclarePassive failed for {QueueName}", $"sms_queue_{i}");
+                }
+            }
+        }
+
+        return null;
     }
 
     public void Publish(string exchange, string routingKey, byte[] body)

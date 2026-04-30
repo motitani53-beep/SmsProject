@@ -24,7 +24,9 @@ export interface Contact {
   phone: string; // כפי שהופיע בקובץ
   isValid: boolean;
   validationError?: string;
-  [key: string]: string | boolean | undefined; // Dynamic columns
+  /** שדות דינמיים לפי כותרות CSV — תואם ל־custom_fields ב־API */
+  custom_fields?: Record<string, string>;
+  [key: string]: string | boolean | undefined | Record<string, string>; // Dynamic columns
 }
 
 // Campaign

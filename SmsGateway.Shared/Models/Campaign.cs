@@ -32,10 +32,12 @@ public class Campaign
     [MaxLength(50)]
     public string? SenderValue { get; set; }
 
+    /// <summary>Lifecycle: <c>scheduled</c> until fire time, then <c>immediate</c> after the scheduler activates the campaign.</summary>
     [Column("scheduling_type")]
     [MaxLength(50)]
     public string SchedulingType { get; set; } = string.Empty;
 
+    /// <summary>Fire time in UTC (PostgreSQL <c>timestamptz</c>).</summary>
     [Column("scheduled_time")]
     public DateTime? ScheduledTime { get; set; }
 
@@ -72,9 +74,13 @@ public class Campaign
     [Column("completed_at")]
     public DateTime? CompletedAt { get; set; }
 
+    /// <summary>UTC when the campaign entered <see cref="CampaignStatusDb.Processing"/> (scheduler claim or recovery lease).</summary>
+    [Column("processing_started_at")]
+    public DateTime? ProcessingStartedAt { get; set; }
+
     [Column("status")]
     [MaxLength(50)]
-    public string Status { get; set; } = "Pending";
+    public string Status { get; set; } = CampaignStatusDb.Pending;
 
     [Column("assigned_queue")]
     [MaxLength(100)]

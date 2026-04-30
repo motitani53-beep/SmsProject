@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Inetlab.SMPP;
 using Inetlab.SMPP.Builders;
 using Inetlab.SMPP.Common;
@@ -17,6 +18,15 @@ namespace TransmitterMicroservice;
 public class SmppGateway : ISmppGateway
 {
     private const int EnquireLinkReportIntervalMinutes = 2;
+
+    /// <summary>Hard timeout when acquiring <see cref="_smppSendLock"/> to prevent silent deadlocks.</summary>
+    private static readonly TimeSpan SmppLockTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Expected SMSC MessageId format: yyMMddHHmmss (12 digits) + phone number (9-15 digits) = 21-27 chars, all digits.
+    /// Rejects garbage numeric values from mismatched PDU responses.
+    /// </summary>
+    private static readonly Regex ValidSmscMessageIdPattern = new(@"^\d{21,27}$", RegexOptions.Compiled);
 
     /// <summary>Original length &lt; 30 (after newline normalize): scenario A caps total length at <see cref="PaddingShortMessageMaxTotalLength"/>.</summary>
     private const int PaddingShortMessageMaxOriginalLength = 30;
@@ -43,6 +53,12 @@ public class SmppGateway : ISmppGateway
     private Timer? _enquireLinkTimer;
     private bool _eventsSubscribed;
     private DateTime _lastRabbitReport = DateTime.MinValue;
+
+    /// <summary>
+    /// Serializes SMPP PDU operations (SubmitSm, EnquireLink) so that an EnquireLinkResp
+    /// cannot be mismatched to a SubmitSm request on the shared TCP connection.
+    /// </summary>
+    private readonly SemaphoreSlim _smppSendLock = new(1, 1);
 
     public SmppGateway(ILogger<SmppGateway> logger, IOptions<SmppOptions> options, IRabbitMqManager rabbitMqManager)
     {
@@ -155,9 +171,24 @@ public class SmppGateway : ISmppGateway
         _logger.LogInformation("Sending message ({PartCount} part(s)) - DeliveryId: {DeliveryId}, To: {Destination}",
             parts.Length, deliveryId, destinationAddress);
 
-        // Submit all concatenated parts in one call so Inetlab returns a SubmitSmResp[] 1:1 with parts
-        // (avoids reused/mismatched response objects when submitting parts sequentially).
-        var responses = await _client.SubmitAsync(parts);
+        // Acquire the SMPP send lock so EnquireLink cannot interleave with SubmitSm on the wire.
+        if (!await _smppSendLock.WaitAsync(SmppLockTimeout, cancellationToken))
+        {
+            _logger.LogError("Timed out acquiring SMPP send lock after {Timeout}s - DeliveryId: {DeliveryId}. Possible deadlock.",
+                SmppLockTimeout.TotalSeconds, deliveryId);
+            return null;
+        }
+
+        SubmitSmResp[] responses;
+        try
+        {
+            responses = await _client.SubmitAsync(parts);
+        }
+        finally
+        {
+            _smppSendLock.Release();
+        }
+
         if (responses == null || responses.Length != parts.Length)
         {
             _logger.LogError(
@@ -169,6 +200,7 @@ public class SmppGateway : ISmppGateway
         }
 
         SubmitSmResp? lastResp = null;
+        string? finalId = null;
         for (var i = 0; i < parts.Length; i++)
         {
             var part = parts[i];
@@ -195,8 +227,8 @@ public class SmppGateway : ISmppGateway
                 throw new InvalidOperationException($"Submit failed: {status}");
             }
 
-            var providerMessageId = SmppSubmitSmRespMessageId.GetOpaqueTrimmed(resp);
-            if (string.IsNullOrEmpty(providerMessageId))
+            string smscId = resp.MessageId?.TrimEnd('\0') ?? string.Empty;
+            if (string.IsNullOrEmpty(smscId))
             {
                 _logger.LogError(
                     "SubmitSmResp missing provider MessageId for part {Part}/{Total} - DeliveryId: {DeliveryId}. Response will not be published.",
@@ -206,16 +238,26 @@ public class SmppGateway : ISmppGateway
                 throw new InvalidOperationException("SubmitSmResp missing provider MessageId");
             }
 
+            if (!ValidSmscMessageIdPattern.IsMatch(smscId))
+            {
+                _logger.LogError(
+                    "SubmitSmResp returned malformed MessageId '{SmscMessageId}' for part {Part}/{Total} - DeliveryId: {DeliveryId}. " +
+                    "Expected format: 21-27 digits (yyMMddHHmmss + phone). Possible PDU mismatch.",
+                    smscId, i + 1, parts.Length, deliveryId);
+                throw new InvalidOperationException(
+                    $"SubmitSmResp returned malformed MessageId '{smscId}' — possible PDU response mismatch");
+            }
+
             lastResp = resp;
-            onPartSent?.Invoke(providerMessageId, resp, i + 1, parts.Length);
+            finalId = smscId;
+            onPartSent?.Invoke(smscId, resp, i + 1, parts.Length);
 
             _logger.LogDebug("Part {Part}/{Total} sent - DeliveryId: {DeliveryId}, SmscMessageId: {SmscMessageId}",
-                i + 1, parts.Length, deliveryId, providerMessageId);
+                i + 1, parts.Length, deliveryId, smscId);
         }
 
-        var lastSmscId = lastResp is null ? null : SmppSubmitSmRespMessageId.GetOpaqueTrimmed(lastResp);
         _logger.LogInformation("Message sent successfully - DeliveryId: {DeliveryId}, SmscMessageId: {SmscMessageId}",
-            deliveryId, lastSmscId);
+            deliveryId, finalId);
         return lastResp;
     }
 
@@ -227,7 +269,16 @@ public class SmppGateway : ISmppGateway
         _logger.LogDebug("EnquireLink timer disposed");
 
         if (_client == null)
+        {
+            _smppSendLock.Dispose();
             return;
+        }
+
+        // Wait for any in-flight SubmitAsync / EnquireLinkAsync to finish before tearing down.
+        if (!await _smppSendLock.WaitAsync(SmppLockTimeout, cancellationToken))
+        {
+            _logger.LogWarning("Timed out waiting for SMPP send lock during shutdown. Proceeding with disconnect.");
+        }
 
         try
         {
@@ -254,6 +305,11 @@ public class SmppGateway : ISmppGateway
         }
         finally
         {
+            // Release the lock only if we acquired it (WaitAsync returned true).
+            // Safe to call even if we timed out — Release would throw, but we're in finally.
+            try { _smppSendLock.Release(); } catch (SemaphoreFullException) { }
+            _smppSendLock.Dispose();
+
             try
             {
                 _client.Dispose();
@@ -491,7 +547,23 @@ public class SmppGateway : ISmppGateway
             }
 
             var enquireLink = new EnquireLink();
-            var resp = await _client.EnquireLinkAsync(enquireLink);
+
+            if (!await _smppSendLock.WaitAsync(SmppLockTimeout))
+            {
+                _logger.LogWarning("Timed out acquiring SMPP send lock for EnquireLink after {Timeout}s. Skipping this cycle.",
+                    SmppLockTimeout.TotalSeconds);
+                return;
+            }
+
+            EnquireLinkResp? resp;
+            try
+            {
+                resp = await _client.EnquireLinkAsync(enquireLink);
+            }
+            finally
+            {
+                _smppSendLock.Release();
+            }
 
             if (resp?.Header.Status == CommandStatus.ESME_ROK)
             {

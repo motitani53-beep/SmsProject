@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -5,6 +6,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SmsGateway.Shared.Data;
 using SmsGateway.Shared.Models;
+using WebApplication1.Hubs;
 
 namespace WebApplication1.Services;
 
@@ -21,15 +23,18 @@ public sealed class CampaignMonitoringWorker : BackgroundService
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
+    private readonly IHubContext<CampaignHub> _campaignHub;
     private readonly ILogger<CampaignMonitoringWorker> _logger;
 
     public CampaignMonitoringWorker(
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
+        IHubContext<CampaignHub> campaignHub,
         ILogger<CampaignMonitoringWorker> logger)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
+        _campaignHub = campaignHub;
         _logger = logger;
     }
 
@@ -112,6 +117,25 @@ public sealed class CampaignMonitoringWorker : BackgroundService
                     }
 
                     await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                    foreach (var row in stuck)
+                    {
+                        try
+                        {
+                            await _campaignHub
+                                .SendDeliveryStatusAsync(row.CampaignId, row.Id, row.Status, cancellationToken)
+                                .ConfigureAwait(false);
+                            _logger.LogInformation("SignalR update sent for delivery {Id}", row.Id);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(
+                                ex,
+                                "SignalR broadcast skipped for campaign {CampaignId} delivery {DeliveryId} (expiry)",
+                                row.CampaignId,
+                                row.Id);
+                        }
+                    }
+
                     _logger.LogWarning(
                         "Campaign {CampaignId}: forced expiry of {Count} stuck message(s) after DLR timeout ({Hours}h).",
                         campaign.Id,

@@ -147,34 +147,7 @@ public class QueueDispatcherService : BackgroundService
     /// <summary>
     /// Iterates smsc.topic.0 .. smsc.topic.(N-1) (queue names sms_queue_0 .. sms_queue_(N-1)), returns first with MessageCount == 0.
     /// </summary>
-    private string? TryFindAvailableQueue()
-    {
-        var n = _options.NumberOfTopics;
-        var prefix = _options.TopicNamePrefix;
-
-        lock (_channelLock)
-        {
-            if (_channel == null || _channel.IsClosed)
-                return null;
-
-            for (var i = 0; i < n; i++)
-            {
-                try
-                {
-                    var queueName = $"sms_queue_{i}";
-                    var decl = _channel.QueueDeclarePassive(queueName);
-                    if (decl.MessageCount == 0)
-                        return $"{prefix}.{i}";
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogDebug(ex, "QueueDeclarePassive failed for sms_queue_{Index}", i);
-                }
-            }
-        }
-
-        return null;
-    }
+    private string? TryFindAvailableQueue() => _rabbitMqService.TryGetFirstAvailableSmsTopicRoutingKey();
 
     private bool EnsureConnection()
     {

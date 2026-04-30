@@ -21,4 +21,9 @@ public interface IRabbitMqService
     /// Attempts to establish or verify the connection. Returns true if connected, false if unreachable.
     /// </summary>
     bool TryEnsureConnection();
+
+    /// <summary>
+    /// Returns the first SMS topic routing key whose bound queue (<c>sms_queue_{i}</c>) has <c>MessageCount == 0</c>, or null if none.
+    /// </summary>
+    string? TryGetFirstAvailableSmsTopicRoutingKey();
 }

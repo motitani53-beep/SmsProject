@@ -1,6 +1,7 @@
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace SmsGateway.Shared.Models;
 
@@ -58,7 +59,9 @@ public class DeliveryDetails
     [Column("additional_data", TypeName = "jsonb")]
     public JsonElement? AdditionalData { get; set; }
 
+    /// <summary>Navigation to parent campaign — ignored for JSON to avoid cycles when serializing <see cref="Campaign"/> with <see cref="Campaign.DeliveryDetails"/>.</summary>
     [ForeignKey("CampaignId")]
+    [JsonIgnore]
     public virtual Campaign Campaign { get; set; } = null!;
 
     /// <summary>Per-segment SMSC message ids for multipart SMS (one row per part).</summary>

@@ -244,4 +244,43 @@
     direction: ltr;
     unicode-bidi: embed;
   }
+
+  /* Sweeping highlight on top of an active progress fill — gives a "live" feel. */
+  @keyframes progress-shimmer {
+    0% { transform: translateX(-110%); }
+    100% { transform: translateX(110%); }
+  }
+  .progress-shimmer {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0) 0%,
+      rgba(255, 255, 255, 0.55) 50%,
+      rgba(255, 255, 255, 0) 100%
+    );
+    animation: progress-shimmer 1.8s ease-in-out infinite;
+    pointer-events: none;
+  }
+
+  /* Slim sliding bar shown when progress is 0% but the system is actively working. */
+  @keyframes progress-indeterminate {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(400%); }
+  }
+  .progress-indeterminate {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 25%;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      hsl(var(--primary) / 0.85) 50%,
+      transparent 100%
+    );
+    animation: progress-indeterminate 1.8s ease-in-out infinite;
+    pointer-events: none;
+    border-radius: 9999px;
+  }
 }

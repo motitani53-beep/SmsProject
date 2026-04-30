@@ -19,6 +19,56 @@ interface ParsedData {
 }
 
 const ACCEPT = '.csv,text/csv,application/vnd.ms-excel';
+const MAX_CONTACTS = 10000;
+
+/** נרמול רק לזיהוי עמודת טלפון בשם "phone" (לא משפיע על מפתחות custom_fields). */
+function normalizeCsvHeader(name: string): string {
+  return name
+    .replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF\u00A0]/g, '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+/** עמודת טלפון: עמודה בשם phone (לא רגיש לאותיות) או העמודה הראשונה */
+function resolvePhoneColumnName(columns: string[]): string | null {
+  if (!columns.length) return null;
+  const byName = columns.find((col) => normalizeCsvHeader(col) === 'phone');
+  return byName ?? columns[0];
+}
+
+/** מיפוי שורת CSV לאיש קשר + custom_fields (מפתחות = כותרות הקובץ) */
+function mapCsvRowToContact(
+  row: Record<string, string>,
+  columns: string[],
+  phoneColumnName: string,
+  index: number
+): Contact {
+  const rawPhone = row[phoneColumnName] ?? '';
+  const validation = validatePhone(rawPhone);
+  const phone = validation.isValid && validation.normalizedPhone ? validation.normalizedPhone : rawPhone.trim();
+
+  const custom_fields: Record<string, string> = {};
+  for (const col of columns) {
+    if (col === phoneColumnName) continue;
+    custom_fields[col] = row[col] ?? '';
+  }
+
+  const contact: Contact = {
+    id: `id-${Date.now()}-${index}-${Math.random().toString(36).substr(2, 9)}`,
+    phone,
+    isValid: validation.isValid,
+    validationError: validation.error,
+    custom_fields,
+  };
+
+  for (const col of columns) {
+    if (col === phoneColumnName) continue;
+    contact[col] = row[col] ?? '';
+  }
+
+  return contact;
+}
 
 export function CSVUpload() {
   const { setImportedData, importedContacts, clearImportedData, campaignFormMessage } = useAppStore();
@@ -41,32 +91,16 @@ export function CSVUpload() {
   const processImport = useCallback((data: ParsedData, selectedPhoneColumn: string) => {
     if (!selectedPhoneColumn) return;
 
-    // Note: validation that all [placeholders] in the message exist as CSV
+    // Note: validation that all {placeholders} in the message exist as CSV
     // columns is handled live in CampaignManager and gates the "start campaign"
     // button. We intentionally do NOT block the import here, so the user can
     // fix the message after upload and have the warning clear automatically.
 
     clearImportedData();
 
-    const contacts: Contact[] = data.rows.map((row, index) => {
-      const phone = row[selectedPhoneColumn] || '';
-      const validation = validatePhone(phone);
-
-      const contact: Contact = {
-        id: `id-${Date.now()}-${index}-${Math.random().toString(36).substr(2, 9)}`,
-        phone: phone,
-        isValid: validation.isValid,
-        validationError: validation.error,
-      };
-
-      data.columns.forEach((col) => {
-        if (col !== selectedPhoneColumn) {
-          contact[col] = row[col];
-        }
-      });
-
-      return contact;
-    });
+    const contacts: Contact[] = data.rows.map((row, index) =>
+      mapCsvRowToContact(row, data.columns, selectedPhoneColumn, index)
+    );
 
     setImportedData(contacts, data.columns, selectedPhoneColumn);
     setParsedData(null);
@@ -100,19 +134,20 @@ export function CSVUpload() {
           return;
         }
 
+        if (rows.length > MAX_CONTACTS) {
+          setError('הקובץ גדול יש מגבלה ל10000 מספרים');
+          return;
+        }
+
         const data = { columns, rows };
 
-        const phoneColumnGuess = columns.find((col) =>
-          ['phone', 'phone_number', 'טלפון', 'נייד', 'mobile', 'מספר'].some((term) =>
-            col.toLowerCase().includes(term)
-          )
-        );
-
-        if (phoneColumnGuess) {
-          processImport(data, phoneColumnGuess);
-        } else {
-          setParsedData(data);
+        const phoneColumnGuess = resolvePhoneColumnName(columns);
+        if (!phoneColumnGuess) {
+          setError('הקובץ ריק או לא תקין');
+          return;
         }
+
+        processImport(data, phoneColumnGuess);
       } catch (err) {
         setError('שגיאה בקריאת הקובץ: ' + (err instanceof Error ? err.message : String(err)));
       } finally {
@@ -126,9 +161,19 @@ export function CSVUpload() {
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
+      if (!campaignFormMessage.trim()) {
+        setError('יש להזין תחילה את תוכן ההודעה לפני טעינת קובץ');
+        if (inputRef.current) inputRef.current.value = '';
+        return;
+      }
+      if (!file.name.toLowerCase().endsWith('.csv')) {
+        setError('נא להעלות קובץ CSV בלבד');
+        if (inputRef.current) inputRef.current.value = '';
+        return;
+      }
       processFile(file);
     },
-    [processFile]
+    [processFile, campaignFormMessage]
   );
 
   const onDrop = useCallback(

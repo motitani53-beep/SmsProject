@@ -1,11 +1,13 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using SmsGateway.Shared.Data;
 using SmsGateway.Shared.DTOs;
 using SmsGateway.Shared.Models;
+using WebApplication1.Hubs;
 
 namespace WebApplication1.Services;
 
@@ -24,11 +26,16 @@ public sealed class SmsBatchProcessor : ISmsBatchProcessor
     private const string TimestampFormat = "HH:mm:ss dd/MM/yyyy";
 
     private readonly ApplicationDbContext _db;
+    private readonly IHubContext<CampaignHub> _campaignHub;
     private readonly ILogger<SmsBatchProcessor> _logger;
 
-    public SmsBatchProcessor(ApplicationDbContext db, ILogger<SmsBatchProcessor> logger)
+    public SmsBatchProcessor(
+        ApplicationDbContext db,
+        IHubContext<CampaignHub> campaignHub,
+        ILogger<SmsBatchProcessor> logger)
     {
         _db = db;
+        _campaignHub = campaignHub;
         _logger = logger;
     }
 
@@ -183,8 +190,33 @@ public sealed class SmsBatchProcessor : ISmsBatchProcessor
                     result.ToAck.Add(item.DeliveryTag);
             }
 
+            // Snapshot modified delivery rows (current in-memory Status) before SaveChanges; broadcast after commit so clients see persisted state.
+            var deliveryStatusBroadcasts = CollectDeliveryStatusUpdates(_db);
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+            // Hub sends immediately after successful commit (same campaign group as JoinCampaign). Parallelize for large batches.
+            await Task.WhenAll(
+                deliveryStatusBroadcasts.Select(async t =>
+                {
+                    try
+                    {
+                        await _campaignHub
+                            .SendDeliveryStatusAsync(t.CampaignId, t.DeliveryId, t.Status, cancellationToken)
+                            .ConfigureAwait(false);
+                        _logger.LogInformation("SignalR update sent for delivery {Id}", t.DeliveryId);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(
+                            ex,
+                            "SignalR broadcast skipped for campaign {CampaignId} delivery {DeliveryId}",
+                            t.CampaignId,
+                            t.DeliveryId);
+                    }
+                })
+            ).ConfigureAwait(false);
+
             return result;
         }
         catch
@@ -280,6 +312,7 @@ public sealed class SmsBatchProcessor : ISmsBatchProcessor
         {
             if (!parent.SentAt.HasValue)
                 parent.SentAt = now;
+            // Acceptable (4): first "sent to SMSC" state — tracked row is picked up by CollectDeliveryStatusUpdates → SignalR after SaveChanges.
             SetParentStatusMonotonic(parent, DeliveryStatus.Acceptable);
             parent.ErrorMessage = null;
             parent.Processed = false;
@@ -402,6 +435,15 @@ public sealed class SmsBatchProcessor : ISmsBatchProcessor
         {
             segment.Status = SegmentStatusAccepted;
             segment.DeliveredAt = delAt;
+            // Intermediate provider ACK (e.g. ACCEPTED): promote parent so DB/UI/SignalR can show Accepted (3) without waiting for final DLR.
+            if (mapped == DeliveryStatus.Accepted
+                && parent.Status is not DeliveryStatus.Successful
+                and not DeliveryStatus.Failed
+                and not DeliveryStatus.Expired
+                and not DeliveryStatus.TimeoutSMSC)
+            {
+                SetParentStatusMonotonic(parent, DeliveryStatus.Accepted);
+            }
         }
     }
 
@@ -560,6 +602,35 @@ public sealed class SmsBatchProcessor : ISmsBatchProcessor
         if (s.Contains("EXPIR"))
             return DeliveryStatus.Expired;
         return DeliveryStatus.Unknown;
+    }
+
+    /// <summary>
+    /// Collects <see cref="DeliveryDetails"/> rows whose <see cref="DeliveryDetails.Status"/> changed in this unit of work,
+    /// immediately before <see cref="DbContext.SaveChangesAsync"/>. Includes, in the same batch:
+    /// <list type="bullet">
+    /// <item><description>First SubmitSmResp success: <see cref="DeliveryStatus.Pending"/> → <see cref="DeliveryStatus.Acceptable"/> (4) for "נשלח".</description></item>
+    /// <item><description>SubmitSmResp failure: → <see cref="DeliveryStatus.Failed"/> (2).</description></item>
+    /// <item><description>DLR terminal failure/expiry: → <see cref="DeliveryStatus.Failed"/> (2).</description></item>
+    /// <item><description>Intermediate DLR mapped to <see cref="DeliveryStatus.Accepted"/> (3): parent row updated in <see cref="ApplyDlrToSegment"/>.</description></item>
+    /// <item><description>Multipart completion: → <see cref="DeliveryStatus.Successful"/> (1) in <see cref="TryCompleteMultipartParent"/>.</description></item>
+    /// </list>
+    /// Each modified row is broadcast once per batch with its final <see cref="DeliveryDetails.Status"/> for that batch.
+    /// </summary>
+    private static List<(int CampaignId, int DeliveryId, DeliveryStatus Status)> CollectDeliveryStatusUpdates(
+        ApplicationDbContext db)
+    {
+        var list = new List<(int, int, DeliveryStatus)>();
+        foreach (var entry in db.ChangeTracker.Entries<DeliveryDetails>())
+        {
+            if (entry.State != EntityState.Modified)
+                continue;
+            if (!entry.Property(e => e.Status).IsModified)
+                continue;
+            var e = entry.Entity;
+            list.Add((e.CampaignId, e.Id, e.Status));
+        }
+
+        return list;
     }
 
     private static DateTime? ParseDlrTimestamp(string? timestamp)

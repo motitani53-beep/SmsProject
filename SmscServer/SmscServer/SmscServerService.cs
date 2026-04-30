@@ -15,6 +15,15 @@ public class SmscServerService : BackgroundService
     private readonly IConfiguration _configuration;
     private SmppServer? _server;
 
+    /// <summary>Serializes MessageId generation across concurrent SubmitSm handlers.</summary>
+    private readonly object _submitSmMessageIdLock = new();
+
+    /// <summary>
+    /// Last UTC timestamp (whole seconds) used in a generated MessageId. Advanced by at least one second
+    /// whenever a new SubmitSm would reuse the same yyMMddHHmmss prefix (multi-part batch or same-millisecond burst).
+    /// </summary>
+    private DateTime _lastSubmitSmMessageIdUtcSecond = DateTime.SpecifyKind(DateTime.MinValue, DateTimeKind.Utc);
+
     public SmscServerService(ILogger<SmscServerService> logger, IConfiguration configuration)
     {
         _logger = logger;
@@ -56,8 +65,8 @@ public class SmscServerService : BackgroundService
 └──────────────────────────────────────────────┘",
                 sourceAddr, destAddr, coding, len, content);
 
-            // Format: yyMMddHHmmss + RecipientPhoneNumber (plain string, so Web API can match SubmitSmResp and DLR)
-            var messageId = DateTime.UtcNow.ToString("yyMMddHHmmss", CultureInfo.InvariantCulture) + destAddr;
+            // Format: yyMMddHHmmss + RecipientPhoneNumber; strictly increasing time suffix so each PDU (incl. concat parts) is unique.
+            var messageId = BuildUniqueSubmitSmMessageId(destAddr);
 
             // 1. מענה מיידי לאותו Client ששלח (SubmitSmResp) – MessageId as plain string
             var response = new SubmitSmResp(submitSm) { MessageId = messageId };
@@ -102,6 +111,25 @@ public class SmscServerService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
             await Task.Delay(1000, stoppingToken);
+    }
+
+    /// <summary>
+    /// Thread-safe MessageId: <c>{yyMMddHHmmss}{destination}</c>. Uses <see cref="DateTime.UtcNow"/> truncated to seconds,
+    /// but if that second is not strictly after the last issued id (same burst / same clock second), advances by one second.
+    /// </summary>
+    private string BuildUniqueSubmitSmMessageId(string destinationAddress)
+    {
+        lock (_submitSmMessageIdLock)
+        {
+            var now = DateTime.UtcNow;
+            var candidate = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, now.Second, DateTimeKind.Utc);
+
+            if (_lastSubmitSmMessageIdUtcSecond >= candidate)
+                candidate = _lastSubmitSmMessageIdUtcSecond.AddSeconds(1);
+
+            _lastSubmitSmMessageIdUtcSecond = candidate;
+            return candidate.ToString("yyMMddHHmmss", CultureInfo.InvariantCulture) + destinationAddress;
+        }
     }
 
     /// <summary>

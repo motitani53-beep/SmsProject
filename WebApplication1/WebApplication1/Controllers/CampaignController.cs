@@ -53,22 +53,25 @@ public class CampaignController : ControllerBase
 
         try
         {
-            // Validate scheduling
-            if (request.Scheduling.Type == "scheduled" && !request.Scheduling.ScheduledTime.HasValue)
+            var schedulingTypeNorm = string.IsNullOrWhiteSpace(request.Scheduling.Type)
+                ? string.Empty
+                : request.Scheduling.Type.Trim().ToLowerInvariant();
+            var isScheduled = schedulingTypeNorm == "scheduled";
+
+            if (isScheduled && !request.Scheduling.ScheduledTime.HasValue)
             {
                 _logger.LogWarning("Scheduled type requires ScheduledTime");
                 return BadRequest(new { error = "Scheduled type requires ScheduledTime" });
             }
 
-            // Verify database connectivity
             if (!await _context.Database.CanConnectAsync())
             {
                 _logger.LogWarning("CreateCampaign rejected: Database unreachable");
                 return StatusCode(503, new { error = "Error: Could not connect to Database" });
             }
 
-            // Verify RabbitMQ connectivity
-            if (!_rabbitMqService.TryEnsureConnection())
+            // Scheduled campaigns are persisted first; RabbitMQ is used only when CampaignSchedulerWorker fires.
+            if (!isScheduled && !_rabbitMqService.TryEnsureConnection())
             {
                 _logger.LogWarning("CreateCampaign rejected: Message Queue unreachable");
                 return StatusCode(503, new { error = "Error: Could not connect to Message Queue" });
@@ -105,22 +108,37 @@ public class CampaignController : ControllerBase
             // Start with filtered unique count; after inserts we overwrite with exact inserted row count.
             var recipientCount = uniqueRecipients.Count;
             // High-priority: queue assigned immediately; others until QueueDispatcherService picks them up (status tracks lifecycle: In Progress, etc.)
+            var normalizedSenderType = CampaignSenderResolver.NormalizeSenderType(
+                request.SenderConfig.SenderType,
+                request.SenderConfig.SenderValue);
+            var trimmedSenderValue = request.SenderConfig.SenderValue?.Trim();
+
+            DateTime? scheduledTimeUtc = null;
+            if (isScheduled)
+                scheduledTimeUtc = ToUtcScheduledTime(request.Scheduling.ScheduledTime!.Value);
+            else if (request.Scheduling.ScheduledTime.HasValue)
+                scheduledTimeUtc = ToUtcScheduledTime(request.Scheduling.ScheduledTime.Value);
+
+            var schedulingTypeStored = isScheduled
+                ? "scheduled"
+                : (string.IsNullOrEmpty(schedulingTypeNorm) ? "immediate" : schedulingTypeNorm);
+
             var campaign = new Campaign
             {
                 CampaignName = request.CampaignName,
                 MessageContent = request.MessageContent,
                 MessageLanguage = request.MessageLanguage,
-                SenderType = request.SenderConfig.SenderType,
-                SenderValue = request.SenderConfig.SenderValue,
-                SchedulingType = request.Scheduling.Type,
-                ScheduledTime = request.Scheduling.ScheduledTime,
+                SenderType = normalizedSenderType,
+                SenderValue = trimmedSenderValue,
+                SchedulingType = schedulingTypeStored,
+                ScheduledTime = scheduledTimeUtc,
                 Priority = request.Priority,
                 Code = request.Code,
                 Provider = request.Provider,
                 TotalMessages = recipientCount,
                 TotalSentMessages = 0,
-                Status = "In Progress",
-                AssignedQueue = isHighPriority ? "sms_high_priority" : null
+                Status = isScheduled ? CampaignStatusDb.Scheduled : CampaignStatusDb.InProgress,
+                AssignedQueue = isScheduled ? null : (isHighPriority ? "sms_high_priority" : null)
             };
 
             _context.Campaigns.Add(campaign);
@@ -144,9 +162,9 @@ public class CampaignController : ControllerBase
                 var resolvedMessageContent = _messageProcessingService.ReplaceMessageFields(
                     campaign.MessageContent, customFields);
 
-                // Assign actual sender (same logic as MessageProcessingService, so DB and Rabbit message match)
-                var actualSender = _senderPhoneService.GetNextPhoneNumberForCampaign(
-                    campaign.Id, i, campaign.SenderType ?? string.Empty, campaign.SenderValue);
+                // Fixed sender: use SenderValue only (no pool). Random: pool via SenderPhoneNumberService.
+                var actualSender = CampaignSenderResolver.ResolveActualSender(
+                    campaign.Id, i, campaign.SenderType, campaign.SenderValue, _senderPhoneService);
 
                 _logger.LogInformation("[Campaign {CampaignId}] Mapping recipient {RecipientNumber} to sender {SenderNumber}.",
                     campaign.Id, recipientDto.PhoneNumber, actualSender);
@@ -177,6 +195,23 @@ public class CampaignController : ControllerBase
 
             _logger.LogInformation("Added {Count} delivery details to campaign {CampaignId}",
                 insertedDeliveryRows, campaign.Id);
+
+            if (isScheduled)
+            {
+                _logger.LogInformation(
+                    "Campaign {CampaignId} scheduled for {ScheduledUtc:o} (UTC); delivery rows created, no RabbitMQ publish.",
+                    campaign.Id,
+                    scheduledTimeUtc);
+
+                return Ok(new
+                {
+                    campaignId = campaign.Id,
+                    status = campaign.Status,
+                    message = "Campaign scheduled; messages will be dispatched at the scheduled time (UTC).",
+                    recipientsCount = insertedDeliveryRows,
+                    scheduledTimeUtc
+                });
+            }
 
             const string highPriorityQueue = "sms_high_priority";
             const string highPriorityRoutingKey = "sms.priority";
@@ -222,6 +257,15 @@ public class CampaignController : ControllerBase
             return StatusCode(500, new { error = "An error occurred while creating the campaign", details = ex.Message });
         }
     }
+
+    /// <summary>Normalizes client-supplied wall time to UTC for <c>timestamptz</c> storage.</summary>
+    private static DateTime ToUtcScheduledTime(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        DateTimeKind.Unspecified => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+        _ => value.ToUniversalTime()
+    };
 
     [HttpGet("{id}")]
     public async Task<IActionResult> GetCampaign(int id)
@@ -284,6 +328,40 @@ public class CampaignController : ControllerBase
             Failed = Failed(),
             LastUpdated = lastUpdated
         });
+    }
+
+    /// <summary>
+    /// Hard-deletes a scheduled campaign (and its delivery_details) before the scheduler picks it up.
+    /// Refuses to delete if status is not "Scheduled" or scheduled_time is within the next minute.
+    /// </summary>
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> DeleteScheduledCampaign(int id)
+    {
+        await using var transaction = await _context.Database.BeginTransactionAsync();
+
+        var campaign = await _context.Campaigns.FirstOrDefaultAsync(c => c.Id == id);
+        if (campaign == null)
+        {
+            return NotFound(new { error = "Campaign not found" });
+        }
+
+        if (!CampaignStatusDb.IsScheduled(campaign.Status))
+        {
+            return BadRequest(new { error = "ניתן לבטל רק קמפיין מתוזמן שטרם החל" });
+        }
+
+        if (campaign.ScheduledTime == null || campaign.ScheduledTime.Value <= DateTime.UtcNow.AddMinutes(1))
+        {
+            return BadRequest(new { error = "לא ניתן לבטל קמפיין שנותרה לו פחות מדקה לתחילת השליחה" });
+        }
+
+        await _context.DeliveryDetails.Where(d => d.CampaignId == id).ExecuteDeleteAsync();
+        await _context.Campaigns.Where(c => c.Id == id).ExecuteDeleteAsync();
+
+        await transaction.CommitAsync();
+
+        _logger.LogInformation("Scheduled campaign {Id} cancelled and deleted by user request", id);
+        return Ok(new { message = "Campaign cancelled successfully" });
     }
 }
 

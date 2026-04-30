@@ -26,6 +26,8 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.CampaignName);
             entity.HasIndex(e => e.CreatedAt);
             entity.HasIndex(e => e.Status);
+            entity.HasIndex(e => new { e.Status, e.SchedulingType, e.ScheduledTime })
+                  .HasDatabaseName("idx_campaigns_schedule_pickup");
 
             entity.HasMany(e => e.DeliveryDetails)
                   .WithOne(e => e.Campaign)
