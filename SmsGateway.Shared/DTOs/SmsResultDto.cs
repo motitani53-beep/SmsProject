@@ -39,4 +39,8 @@ public class SmsResultDto
 
     [JsonPropertyName("total_parts")]
     public int TotalParts { get; set; }
+
+    /// <summary>Forwarded by the Transmitter when the originating SendRequest was a test SMS. Null for normal traffic.</summary>
+    [JsonPropertyName("test_message_id")]
+    public int? TestMessageId { get; set; }
 }

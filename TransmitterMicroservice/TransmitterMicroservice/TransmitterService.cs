@@ -172,6 +172,13 @@ public class TransmitterService : BackgroundService
             var messageText = sendRequest.MessageText;
             var deliveryIdValue = deliveryId.Value;
 
+            // Capture inbound SourceType header (e.g. "Test") so we can forward it onto every part's SubmitSmResp.
+            var inboundHeaders = result.BasicProperties?.Headers as IDictionary<string, object>;
+            var sourceType = ReadSourceTypeHeader(inboundHeaders);
+            var outboundHeaders = string.IsNullOrEmpty(sourceType)
+                ? null
+                : (IReadOnlyDictionary<string, object>)new Dictionary<string, object> { { "SourceType", sourceType! } };
+
             void OnPartSent(string smscMessageId, SubmitSmResp submitResp, int partNumber, int totalParts)
             {
                 // Id string is produced only inside SmppGateway (same path for 1-part and multi-part); do not re-read MessageId here.
@@ -180,8 +187,8 @@ public class TransmitterService : BackgroundService
                     throw new InvalidOperationException("SubmitSmResp missing provider MessageId");
                 }
 
-                _logger.LogInformation("Part Sent - DeliveryId: {DeliveryId}, SmscMessageId: {SmscMessageId}, Status: {Status}",
-                    deliveryIdValue, smscMessageId, submitResp.Header.Status.ToString());
+                _logger.LogInformation("Part Sent - DeliveryId: {DeliveryId}, SmscMessageId: {SmscMessageId}, Status: {Status}, SourceType: {SourceType}",
+                    deliveryIdValue, smscMessageId, submitResp.Header.Status.ToString(), sourceType ?? "(none)");
 
                 var resultDto = new SubmitSmRespDto
                 {
@@ -193,11 +200,12 @@ public class TransmitterService : BackgroundService
                     Status = submitResp.Header.Status.ToString(),
                     CommandStatus = (int)submitResp.Header.Status,
                     PartNumber = partNumber,
-                    TotalParts = totalParts
+                    TotalParts = totalParts,
+                    TestMessageId = sendRequest.TestMessageId
                 };
                 var json = JsonSerializer.Serialize(resultDto);
                 var body = Encoding.UTF8.GetBytes(json);
-                _rabbitMqManager.SafePublish(deliveryIdValue, smscMessageId, submitResp.Header.Status.ToString(), body);
+                _rabbitMqManager.SafePublish(deliveryIdValue, smscMessageId, submitResp.Header.Status.ToString(), body, outboundHeaders);
             }
 
             var sendResult = await _smppGateway.SendSmsAsync(
@@ -225,6 +233,31 @@ public class TransmitterService : BackgroundService
 
             _rabbitMqManager.SafeNack(deliveryTag, requeue: true, deliveryId);
         }
+    }
+
+    /// <summary>
+    /// Reads the AMQP <c>SourceType</c> header (case-insensitive) from inbound message properties.
+    /// RabbitMQ delivers string headers as <see cref="byte"/>[]; we decode UTF-8 before returning.
+    /// </summary>
+    private static string? ReadSourceTypeHeader(IDictionary<string, object>? headers)
+    {
+        if (headers == null || headers.Count == 0)
+            return null;
+
+        foreach (var kv in headers)
+        {
+            if (!string.Equals(kv.Key, "SourceType", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            return kv.Value switch
+            {
+                byte[] bytes => Encoding.UTF8.GetString(bytes),
+                string s => s,
+                _ => kv.Value?.ToString()
+            };
+        }
+
+        return null;
     }
 
     public override async Task StopAsync(CancellationToken cancellationToken)

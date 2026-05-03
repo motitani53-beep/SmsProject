@@ -126,6 +126,24 @@ public class RabbitMqService : IRabbitMqService, IDisposable
         Publish(exchange, routingKey, body);
     }
 
+    /// <inheritdoc />
+    public void PublishJson<T>(string exchange, string routingKey, T message, IReadOnlyDictionary<string, object> headers)
+    {
+        EnsureConnection();
+        if (_channel == null)
+            throw new InvalidOperationException("RabbitMQ channel is not available.");
+
+        var json = JsonSerializer.Serialize(message);
+        var body = Encoding.UTF8.GetBytes(json);
+
+        var props = _channel.CreateBasicProperties();
+        props.Persistent = true;
+        props.ContentType = "application/json";
+        props.Headers = new Dictionary<string, object>(headers);
+
+        _channel.BasicPublish(exchange, routingKey, props, body);
+    }
+
     public void Dispose()
     {
         if (_disposed) return;

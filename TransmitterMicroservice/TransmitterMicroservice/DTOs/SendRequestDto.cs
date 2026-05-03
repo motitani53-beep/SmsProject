@@ -24,5 +24,9 @@ public class SendRequestDto
 
     [JsonPropertyName("actual_sender")]
     public string? ActualSender { get; set; }
+
+    /// <summary>Set only for messages from /api/sms/send-test. Forwarded into the SubmitSmResp so the result-processor can route to test_smsc_ids.</summary>
+    [JsonPropertyName("test_message_id")]
+    public int? TestMessageId { get; set; }
 }
 

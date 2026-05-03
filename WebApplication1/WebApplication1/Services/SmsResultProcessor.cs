@@ -109,7 +109,15 @@ public class SmsResultProcessor : BackgroundService
                     }
 
                     var retryCount = GetRetryCount(headers);
-                    _buffer.Add(new BufferedItem { DeliveryTag = deliveryTag, Dto = dto, RawBody = body, RetryCount = retryCount });
+                    var sourceType = GetSourceType(headers);
+                    _buffer.Add(new BufferedItem
+                    {
+                        DeliveryTag = deliveryTag,
+                        Dto = dto,
+                        RawBody = body,
+                        RetryCount = retryCount,
+                        SourceType = sourceType
+                    });
                 }
 
                 var shouldFlushBySize = _buffer.Count >= _processorOptions.BatchSize;
@@ -229,6 +237,31 @@ public class SmsResultProcessor : BackgroundService
             foreach (var item in batch)
                 Nack(item.DeliveryTag, requeue: true);
         }
+    }
+
+    /// <summary>
+    /// Reads the AMQP <c>SourceType</c> header (case-insensitive). Returns the string value (e.g. <c>"Test"</c>),
+    /// or null when the header is absent. RabbitMQ string headers arrive as <see cref="byte"/>[]; we decode UTF-8.
+    /// </summary>
+    private static string? GetSourceType(IDictionary<string, object>? headers)
+    {
+        if (headers == null || headers.Count == 0)
+            return null;
+
+        foreach (var kv in headers)
+        {
+            if (!string.Equals(kv.Key, "SourceType", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            return kv.Value switch
+            {
+                byte[] bytes => Encoding.UTF8.GetString(bytes),
+                string s => s,
+                _ => kv.Value?.ToString()
+            };
+        }
+
+        return null;
     }
 
     /// <summary>

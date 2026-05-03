@@ -21,4 +21,11 @@ public class SmsMessageDto
 
     [JsonPropertyName("actual_sender")]
     public string? ActualSender { get; set; }
+
+    /// <summary>
+    /// Set ONLY for test SMS sent via /api/sms/send-test. Coexists with the AMQP header <c>SourceType: Test</c>.
+    /// Null for normal campaign traffic.
+    /// </summary>
+    [JsonPropertyName("test_message_id")]
+    public int? TestMessageId { get; set; }
 }

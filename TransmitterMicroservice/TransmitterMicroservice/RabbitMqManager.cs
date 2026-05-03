@@ -195,6 +195,9 @@ public class RabbitMqManager : IRabbitMqManager
     }
 
     public void SafePublish(int deliveryId, string? smscMessageId, string status, byte[] body)
+        => SafePublish(deliveryId, smscMessageId, status, body, headers: null);
+
+    public void SafePublish(int deliveryId, string? smscMessageId, string status, byte[] body, IReadOnlyDictionary<string, object>? headers)
     {
         lock (_channelLock)
         {
@@ -210,6 +213,10 @@ public class RabbitMqManager : IRabbitMqManager
                 var props = _channel.CreateBasicProperties();
                 props.Persistent = true;
                 props.ContentType = "application/json";
+                if (headers != null && headers.Count > 0)
+                {
+                    props.Headers = new Dictionary<string, object>(headers);
+                }
 
                 _channel.BasicPublish(
                     exchange: "",
@@ -217,8 +224,8 @@ public class RabbitMqManager : IRabbitMqManager
                     basicProperties: props,
                     body: body);
 
-                _logger.LogInformation("Published SubmitSmResp to queue - DeliveryId: {DeliveryId}, SmscMessageId: {SmscMessageId}, Status: {Status}",
-                    deliveryId, smscMessageId, status);
+                _logger.LogInformation("Published SubmitSmResp to queue - DeliveryId: {DeliveryId}, SmscMessageId: {SmscMessageId}, Status: {Status}, Headers: {HeaderCount}",
+                    deliveryId, smscMessageId, status, headers?.Count ?? 0);
             }
             catch (AlreadyClosedException ex)
             {

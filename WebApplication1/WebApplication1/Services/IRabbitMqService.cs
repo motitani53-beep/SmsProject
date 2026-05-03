@@ -13,6 +13,11 @@ public interface IRabbitMqService
     void PublishJson<T>(string exchange, string routingKey, T message);
 
     /// <summary>
+    /// Serializes the message as JSON and publishes with the supplied AMQP headers (e.g. <c>SourceType: Test</c>).
+    /// </summary>
+    void PublishJson<T>(string exchange, string routingKey, T message, IReadOnlyDictionary<string, object> headers);
+
+    /// <summary>
     /// Ensures the connection is available. Called internally.
     /// </summary>
     void EnsureConnection();

@@ -35,6 +35,12 @@ public interface IRabbitMqManager
     void SafePublish(int deliveryId, string? smscMessageId, string status, byte[] body);
 
     /// <summary>
+    /// Publishes a message to the results queue with custom AMQP headers (thread-safe).
+    /// Used to forward <c>SourceType: Test</c> from the inbound SendRequest onto the SubmitSmResp.
+    /// </summary>
+    void SafePublish(int deliveryId, string? smscMessageId, string status, byte[] body, IReadOnlyDictionary<string, object>? headers);
+
+    /// <summary>
     /// Publishes a message to the server status queue (e.g. EnquireLink) (thread-safe).
     /// </summary>
     void SafePublishToServerStatus(byte[] body);

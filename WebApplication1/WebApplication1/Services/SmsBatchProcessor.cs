@@ -92,6 +92,66 @@ public sealed class SmsBatchProcessor : ISmsBatchProcessor
         if (list.Count == 0)
             return result;
 
+        // Partition test-message items (header SourceType=Test OR dto.TestMessageId set) out of the main path.
+        // These rows live in test_messages / test_smsc_ids and never touch delivery_details.
+        var testItems = new List<BufferedItem>();
+        var normalItems = new List<BufferedItem>();
+        foreach (var item in list)
+        {
+            if (IsTestItem(item))
+                testItems.Add(item);
+            else
+                normalItems.Add(item);
+        }
+
+        // Spec: for DLRs that arrive without a SourceType header (third-party SMSCs), search delivery_smsc_ids first;
+        // if the SmscMessageId belongs to test_smsc_ids instead, promote the item to the test path before processing.
+        if (normalItems.Count > 0)
+        {
+            var unclassifiedDlrSmscIds = normalItems
+                .Where(i => i.Dto != null && i.Dto.Type == DlrType && !string.IsNullOrWhiteSpace(i.Dto.SmscMessageId))
+                .Select(i => i.Dto.SmscMessageId!.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (unclassifiedDlrSmscIds.Count > 0)
+            {
+                var testSmscMatches = await _db.TestSmscIds
+                    .Where(s => unclassifiedDlrSmscIds.Contains(s.SmscMessageId))
+                    .Select(s => s.SmscMessageId)
+                    .Distinct()
+                    .ToListAsync(cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (testSmscMatches.Count > 0)
+                {
+                    var testSmscSet = new HashSet<string>(testSmscMatches, StringComparer.Ordinal);
+                    var stillNormal = new List<BufferedItem>(normalItems.Count);
+                    foreach (var item in normalItems)
+                    {
+                        var smsc = item.Dto?.SmscMessageId?.Trim();
+                        if (item.Dto?.Type == DlrType && !string.IsNullOrEmpty(smsc) && testSmscSet.Contains(smsc))
+                        {
+                            item.SourceType = "Test";
+                            testItems.Add(item);
+                        }
+                        else
+                        {
+                            stillNormal.Add(item);
+                        }
+                    }
+                    normalItems = stillNormal;
+                }
+            }
+        }
+
+        if (testItems.Count > 0)
+            await ProcessTestItemsAsync(testItems, result, cancellationToken).ConfigureAwait(false);
+
+        list = normalItems;
+        if (list.Count == 0)
+            return result;
+
         var submitIds = new HashSet<int>();
         var dlrSmscIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var item in list)
@@ -648,6 +708,204 @@ public sealed class SmsBatchProcessor : ISmsBatchProcessor
         catch
         {
             return DateTime.UtcNow;
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Test-message routing
+    // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// True for results that belong to /api/sms/send-test traffic. Header <c>SourceType=Test</c> is the primary
+    /// signal (forwarded by the Transmitter); the in-payload <see cref="SmsResultDto.TestMessageId"/> is a backup
+    /// for SubmitSmResp when a header is missing.
+    /// </summary>
+    private static bool IsTestItem(BufferedItem item)
+    {
+        if (string.Equals(item.SourceType, "Test", StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (item.Dto?.TestMessageId.GetValueOrDefault() > 0)
+            return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Processes test SubmitSmResp + DLR results: upserts <c>test_smsc_ids</c> rows, updates the parent
+    /// <c>test_messages.Status</c>, and acks each item. Independent transaction from the main campaign path.
+    /// </summary>
+    /// <remarks>
+    /// Also implements the DLR fallback specified by the feature: when a DLR arrives without a SourceType
+    /// header (third-party SMSC) and was NOT matched in <c>delivery_smsc_ids</c>, the caller in
+    /// <see cref="ProcessBatchAsync"/> performs a <c>test_smsc_ids</c> lookup and routes the matched items here.
+    /// </remarks>
+    private async Task ProcessTestItemsAsync(
+        List<BufferedItem> testItems,
+        SmsBatchProcessResult result,
+        CancellationToken cancellationToken)
+    {
+        if (testItems.Count == 0)
+            return;
+
+        // Reload existing test_smsc_ids that match either the SmscMessageId (DLR path) or the parent TestMessageId (SubmitSmResp path).
+        var dtoSmscIds = testItems
+            .Select(i => i.Dto?.SmscMessageId?.Trim())
+            .Where(s => !string.IsNullOrEmpty(s))
+            .Select(s => s!)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        var parentTestIds = testItems
+            .Select(i => i.Dto?.TestMessageId.GetValueOrDefault() ?? 0)
+            .Where(id => id > 0)
+            .Distinct()
+            .ToList();
+
+        var existingSegments = await _db.TestSmscIds
+            .Where(s => dtoSmscIds.Contains(s.SmscMessageId) || parentTestIds.Contains(s.TestMessageId))
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var segmentsByKey = new Dictionary<(string Smsc, int Part), TestSmscId>();
+        var segmentsBySmsc = new Dictionary<string, List<TestSmscId>>(StringComparer.Ordinal);
+        foreach (var seg in existingSegments)
+        {
+            segmentsByKey[(seg.SmscMessageId, seg.PartNumber)] = seg;
+            if (!segmentsBySmsc.TryGetValue(seg.SmscMessageId, out var list))
+            {
+                list = new List<TestSmscId>();
+                segmentsBySmsc[seg.SmscMessageId] = list;
+            }
+            list.Add(seg);
+        }
+
+        var parentTestMessages = await _db.TestMessages
+            .Where(t => parentTestIds.Contains(t.Id) ||
+                        existingSegments.Select(s => s.TestMessageId).Contains(t.Id))
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var parentById = parentTestMessages.ToDictionary(t => t.Id);
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            foreach (var item in testItems)
+            {
+                var dto = item.Dto;
+                if (dto == null)
+                {
+                    result.ToAck.Add(item.DeliveryTag);
+                    continue;
+                }
+
+                var smsc = dto.SmscMessageId?.Trim();
+                if (string.IsNullOrEmpty(smsc))
+                {
+                    _logger.LogWarning("Test result skipped: missing smsc_message_id (type {Type})", dto.Type);
+                    result.ToAck.Add(item.DeliveryTag);
+                    continue;
+                }
+
+                var partNumber = dto.PartNumber > 0 ? dto.PartNumber : 1;
+
+                if (dto.Type == SubmitSmRespType)
+                {
+                    var testMessageId = dto.TestMessageId.GetValueOrDefault();
+                    if (testMessageId <= 0 || !parentById.TryGetValue(testMessageId, out var parent))
+                    {
+                        _logger.LogWarning("Test SubmitSmResp skipped: unknown test_message_id {Id}", testMessageId);
+                        result.ToAck.Add(item.DeliveryTag);
+                        continue;
+                    }
+
+                    var commandStatus = ResolveSubmitSmRespCommandStatus(dto);
+                    var key = (smsc, partNumber);
+                    if (segmentsByKey.TryGetValue(key, out var existing) && existing.TestMessageId == parent.Id)
+                    {
+                        existing.Status = commandStatus == 0 ? SegmentStatusSent : SegmentStatusFailed;
+                    }
+                    else
+                    {
+                        var seg = new TestSmscId
+                        {
+                            TestMessageId = parent.Id,
+                            SmscMessageId = smsc,
+                            PartNumber = partNumber,
+                            Status = commandStatus == 0 ? SegmentStatusSent : SegmentStatusFailed
+                        };
+                        _db.TestSmscIds.Add(seg);
+                        segmentsByKey[key] = seg;
+                        if (!segmentsBySmsc.TryGetValue(smsc, out var smscList))
+                        {
+                            smscList = new List<TestSmscId>();
+                            segmentsBySmsc[smsc] = smscList;
+                        }
+                        smscList.Add(seg);
+                    }
+
+                    if (parent.Status == "Pending")
+                        parent.Status = commandStatus == 0 ? "Sent" : "Failed";
+
+                    result.ToAck.Add(item.DeliveryTag);
+                }
+                else if (dto.Type == DlrType)
+                {
+                    if (!segmentsBySmsc.TryGetValue(smsc, out var candidates) || candidates.Count == 0)
+                    {
+                        _logger.LogWarning("Test DLR orphan: no test_smsc_ids row for {Smsc}", smsc);
+                        result.ToAck.Add(item.DeliveryTag);
+                        continue;
+                    }
+
+                    var match = dto.PartNumber > 0
+                        ? candidates.FirstOrDefault(c => c.PartNumber == dto.PartNumber)
+                        : candidates.Count == 1 ? candidates[0] : null;
+                    if (match == null)
+                    {
+                        _logger.LogWarning("Test DLR: cannot route {Smsc} (parts={Count}, dto.part={Part})",
+                            smsc, candidates.Count, dto.PartNumber);
+                        result.ToAck.Add(item.DeliveryTag);
+                        continue;
+                    }
+
+                    var mapped = MapDlrStatusToDeliveryStatus(dto.Status);
+                    if (mapped == DeliveryStatus.Successful && IsTerminalDlrMessageState(dto.Status))
+                    {
+                        match.Status = SegmentStatusDelivered;
+                    }
+                    else if (mapped == DeliveryStatus.Failed || mapped == DeliveryStatus.Expired)
+                    {
+                        match.Status = SegmentStatusFailed;
+                    }
+                    else
+                    {
+                        match.Status = SegmentStatusAccepted;
+                    }
+
+                    if (parentById.TryGetValue(match.TestMessageId, out var parent))
+                    {
+                        if (mapped == DeliveryStatus.Successful)
+                            parent.Status = "Delivered";
+                        else if (mapped == DeliveryStatus.Failed || mapped == DeliveryStatus.Expired)
+                            parent.Status = "Failed";
+                    }
+
+                    result.ToAck.Add(item.DeliveryTag);
+                }
+                else
+                {
+                    result.ToAck.Add(item.DeliveryTag);
+                }
+            }
+
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ProcessTestItemsAsync failed; rolling back {Count} test items.", testItems.Count);
+            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            // Bubble up so the parent processor nacks for re-delivery.
+            throw;
         }
     }
 }

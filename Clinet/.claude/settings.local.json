@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(npx tsc:*)",
-      "Bash(npx vitest:*)"
+      "Bash(npx vitest:*)",
+      "Read(//c/Dev/Smpp Project/**)",
+      "Read(//c/Dev/Smpp Project/SmsGateway.Shared/Models/**)",
+      "Bash(grep -n \"^    }$\\\\|^}$\" \"c:/Dev/Smpp Project/WebApplication1/WebApplication1/Services/SmsBatchProcessor.cs\")"
     ]
   }
 }

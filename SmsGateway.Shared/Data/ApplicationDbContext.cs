@@ -15,6 +15,8 @@ public class ApplicationDbContext : DbContext
     public DbSet<DeliverySmscId> DeliverySmscIds { get; set; }
     public DbSet<SmscStatus> SmscStatus { get; set; }
     public DbSet<FailedResultsLog> FailedResultsLog { get; set; }
+    public DbSet<TestMessage> TestMessages { get; set; }
+    public DbSet<TestSmscId> TestSmscIds { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -92,6 +94,31 @@ public class ApplicationDbContext : DbContext
         {
             entity.HasIndex(e => e.Timestamp)
                   .HasDatabaseName("idx_smsc_status_timestamp");
+        });
+
+        // Test SMS — independent of campaigns/delivery_details.
+        modelBuilder.Entity<TestMessage>(entity =>
+        {
+            entity.HasIndex(e => e.CreatedAt).HasDatabaseName("idx_test_messages_created_at");
+            entity.HasIndex(e => e.PhoneNumber).HasDatabaseName("idx_test_messages_phone_number");
+
+            entity.HasMany(e => e.SmscIds)
+                  .WithOne(e => e.TestMessage)
+                  .HasForeignKey(e => e.TestMessageId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<TestSmscId>(entity =>
+        {
+            entity.HasIndex(e => new { e.SmscMessageId, e.PartNumber })
+                  .IsUnique()
+                  .HasDatabaseName("idx_test_smsc_ids_composite");
+
+            entity.HasIndex(e => e.TestMessageId)
+                  .HasDatabaseName("idx_test_smsc_ids_test_message_id");
+
+            entity.HasIndex(e => e.SmscMessageId)
+                  .HasDatabaseName("idx_test_smsc_ids_smsc_message_id");
         });
     }
 }
